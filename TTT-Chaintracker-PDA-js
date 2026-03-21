@@ -1,0 +1,529 @@
+// ==UserScript==
+// @name         ThiccTiredthots Faction Chain Tracker (PDA)
+// @namespace    thicctiredthot
+// @version      1.0
+// @description  PDA chain tracker with license key system
+// @match        https://www.torn.com/*
+// @grant        none
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    const SETTINGS_KEY = 'ttt_chain_tracker_pda_settings';
+    const UI_STATE_KEY = 'ttt_chain_tracker_pda_ui';
+    const LICENSE_URL = 'PASTE_YOUR_RAW_LICENSES_JSON_URL_HERE';
+
+    let lastCopiedText = '';
+
+    const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+    function loadSettings() {
+        try {
+            const raw = localStorage.getItem(SETTINGS_KEY);
+            return raw ? JSON.parse(raw) : {
+                apiKey: '',
+                factionId: '',
+                licenseKey: ''
+            };
+        } catch {
+            return {
+                apiKey: '',
+                factionId: '',
+                licenseKey: ''
+            };
+        }
+    }
+
+    function saveSettings(settings) {
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    }
+
+    function clearSettings() {
+        localStorage.removeItem(SETTINGS_KEY);
+    }
+
+    function defaultUIState() {
+        return {
+            visible: false,
+            compact: false,
+            top: 90,
+            left: Math.max(10, window.innerWidth - 370),
+            bubbleTop: 90,
+            bubbleLeft: Math.max(10, window.innerWidth - 70)
+        };
+    }
+
+    function loadUIState() {
+        try {
+            const raw = localStorage.getItem(UI_STATE_KEY);
+            return raw ? { ...defaultUIState(), ...JSON.parse(raw) } : defaultUIState();
+        } catch {
+            return defaultUIState();
+        }
+    }
+
+    function saveUIState(state) {
+        localStorage.setItem(UI_STATE_KEY, JSON.stringify(state));
+    }
+
+    function clamp(value, min, max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    function escapeHtml(str) {
+        return String(str || '')
+            .replace(/&/g, '&amp;')
+            .replace(/"/g, '&quot;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+    }
+
+    async function fetchJson(url, options = {}, timeoutMs = 12000) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+        try {
+            const res = await fetch(url, {
+                ...options,
+                signal: controller.signal
+            });
+
+            const data = await res.json();
+
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            return data;
+        } finally {
+            clearTimeout(timer);
+        }
+    }
+
+    async function validateLicense(licenseKey, factionId) {
+        const licenses = await fetchJson(LICENSE_URL);
+        return String(licenses[licenseKey] || '') === String(factionId);
+    }
+
+    async function fetchApi(url, apiKey) {
+        const data = await fetchJson(url, {
+            headers: {
+                Authorization: `ApiKey ${apiKey}`,
+                Accept: 'application/json'
+            }
+        });
+
+        if (data?.error) {
+            throw new Error(data.error.error || 'API error');
+        }
+
+        return data;
+    }
+
+    async function fetchInternal(url) {
+        return fetchJson(url, {
+            credentials: 'same-origin',
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest',
+                'Accept': 'application/json'
+            }
+        });
+    }
+
+    function normalizeChains(data) {
+        if (Array.isArray(data)) return data;
+        return Object.values(data.chains || {});
+    }
+
+    function unwrapReport(report) {
+        return report?.result?.chainreport ?? report?.chainreport ?? report?.result ?? report ?? {};
+    }
+
+    function getRows(report) {
+        return Object.values(unwrapReport(report).members || {});
+    }
+
+    function buildCopiedText(sorted, startRaw, endRaw) {
+        let text = `ThiccTiredthots Faction Chain Tracker\n`;
+        text += `${startRaw || 'start'} → ${endRaw || 'now'}\n\n`;
+
+        for (const [name, d] of sorted) {
+            text += `${name} - Hits: ${d.hits} | Chains: ${d.chains}\n`;
+        }
+
+        return text.trim();
+    }
+
+    function createUI() {
+        if (document.getElementById('ttt-pda-bubble')) return;
+
+        const settings = loadSettings();
+        const hasSetup = !!(settings.apiKey && settings.factionId && settings.licenseKey);
+
+        const uiState = loadUIState();
+        if (hasSetup && uiState.compact === false) {
+            uiState.compact = true;
+            saveUIState(uiState);
+        }
+
+        const bubble = document.createElement('button');
+        bubble.id = 'ttt-pda-bubble';
+        bubble.textContent = '💗';
+        Object.assign(bubble.style, {
+            position: 'fixed',
+            top: `${uiState.bubbleTop}px`,
+            left: `${uiState.bubbleLeft}px`,
+            width: '52px',
+            height: '52px',
+            borderRadius: '50%',
+            border: '2px solid #f3a6d6',
+            background: '#f08ac0',
+            color: '#fff',
+            fontSize: '22px',
+            zIndex: '999999',
+            boxShadow: '0 8px 18px rgba(0,0,0,0.22)'
+        });
+
+        const panel = document.createElement('div');
+        panel.id = 'ttt-pda-panel';
+        Object.assign(panel.style, {
+            position: 'fixed',
+            top: `${uiState.top}px`,
+            left: `${uiState.left}px`,
+            width: `${Math.min(window.innerWidth - 20, 360)}px`,
+            maxWidth: 'calc(100vw - 20px)',
+            maxHeight: '70vh',
+            overflow: 'hidden',
+            background: '#fff7fb',
+            color: '#4a2340',
+            border: '2px solid #f3a6d6',
+            borderRadius: '12px',
+            padding: '12px',
+            zIndex: '999998',
+            boxShadow: '0 10px 28px rgba(0,0,0,0.25)',
+            display: uiState.visible ? 'block' : 'none'
+        });
+
+        panel.innerHTML = `
+            <div id="ttt-pda-header" style="font-size:18px;font-weight:700;margin-bottom:10px;color:#c94f9d;touch-action:none;">
+                ThiccTiredthots Faction Chain Tracker
+            </div>
+
+            <div id="ttt-setup">
+                <div style="font-size:12px;">API Key</div>
+                <input id="ttt-api" type="password" value="${escapeHtml(settings.apiKey)}" style="width:100%;margin-bottom:10px;padding:8px;border-radius:8px;border:1px solid #f3c3de;box-sizing:border-box;">
+
+                <div style="font-size:12px;">Faction ID</div>
+                <input id="ttt-faction" type="text" value="${escapeHtml(settings.factionId)}" style="width:100%;margin-bottom:10px;padding:8px;border-radius:8px;border:1px solid #f3c3de;box-sizing:border-box;">
+
+                <div style="font-size:12px;">License Key</div>
+                <input id="ttt-license" type="text" value="${escapeHtml(settings.licenseKey)}" style="width:100%;margin-bottom:10px;padding:8px;border-radius:8px;border:1px solid #f3c3de;box-sizing:border-box;">
+
+                <div style="display:flex;gap:8px;margin-bottom:10px;">
+                    <button id="ttt-save" style="flex:1;background:#f08ac0;color:#fff;border:none;padding:10px 8px;border-radius:8px;font-weight:700;">Save</button>
+                    <button id="ttt-clear" style="flex:1;background:#fff;color:#c94f9d;border:1px solid #f3a6d6;padding:10px 8px;border-radius:8px;font-weight:700;">Clear</button>
+                </div>
+            </div>
+
+            <button id="ttt-toggle-setup" style="width:100%;margin-bottom:10px;background:#fff;color:#c94f9d;border:1px solid #f3a6d6;padding:8px;border-radius:8px;font-weight:700;">
+                ⚙️ Edit Setup
+            </button>
+
+            <div style="font-size:12px;">Start Date</div>
+            <input id="ttt-start" type="date" style="width:100%;margin-bottom:10px;padding:8px;border-radius:8px;border:1px solid #f3c3de;box-sizing:border-box;">
+
+            <div style="font-size:12px;">End Date</div>
+            <input id="ttt-end" type="date" style="width:100%;margin-bottom:10px;padding:8px;border-radius:8px;border:1px solid #f3c3de;box-sizing:border-box;">
+
+            <div style="display:flex;gap:8px;">
+                <button id="ttt-run" style="flex:1;background:#f08ac0;color:#fff;border:none;padding:10px 8px;border-radius:8px;font-weight:700;">Load</button>
+                <button id="ttt-copy" style="flex:1;background:#fff;color:#c94f9d;border:1px solid #f3a6d6;padding:10px 8px;border-radius:8px;font-weight:700;">Copy</button>
+            </div>
+
+            <div id="ttt-status" style="margin-top:10px;font-size:12px;color:#8a4a73;"></div>
+            <div id="ttt-results" style="margin-top:10px;max-height:32vh;overflow:auto;"></div>
+        `;
+
+        document.body.appendChild(bubble);
+        document.body.appendChild(panel);
+
+        function applyCompactMode() {
+            const state = loadUIState();
+            const setup = document.getElementById('ttt-setup');
+            const btn = document.getElementById('ttt-toggle-setup');
+
+            if (state.compact) {
+                setup.style.display = 'none';
+                btn.textContent = '⚙️ Edit Setup';
+            } else {
+                setup.style.display = 'block';
+                btn.textContent = '✅ Hide Setup';
+            }
+        }
+
+        bubble.onclick = () => {
+            const visible = panel.style.display !== 'none';
+            panel.style.display = visible ? 'none' : 'block';
+
+            const state = loadUIState();
+            state.visible = !visible;
+            saveUIState(state);
+        };
+
+        document.getElementById('ttt-toggle-setup').onclick = () => {
+            const state = loadUIState();
+            state.compact = !state.compact;
+            saveUIState(state);
+            applyCompactMode();
+        };
+
+        document.getElementById('ttt-save').onclick = async () => {
+            const apiKey = document.getElementById('ttt-api').value.trim();
+            const factionId = document.getElementById('ttt-faction').value.trim();
+            const licenseKey = document.getElementById('ttt-license').value.trim();
+            const status = document.getElementById('ttt-status');
+
+            if (!apiKey || !factionId || !licenseKey) {
+                status.textContent = 'Fill all fields first.';
+                return;
+            }
+
+            try {
+                status.textContent = 'Validating license...';
+                const valid = await validateLicense(licenseKey, factionId);
+
+                if (!valid) {
+                    status.textContent = 'Invalid license.';
+                    return;
+                }
+
+                saveSettings({ apiKey, factionId, licenseKey });
+
+                const state = loadUIState();
+                state.compact = true;
+                saveUIState(state);
+                applyCompactMode();
+
+                status.textContent = 'Saved.';
+            } catch (err) {
+                status.textContent = `Error: ${err.message}`;
+            }
+        };
+
+        document.getElementById('ttt-clear').onclick = () => {
+            clearSettings();
+            document.getElementById('ttt-api').value = '';
+            document.getElementById('ttt-faction').value = '';
+            document.getElementById('ttt-license').value = '';
+
+            const state = loadUIState();
+            state.compact = false;
+            saveUIState(state);
+            applyCompactMode();
+
+            document.getElementById('ttt-status').textContent = 'Cleared.';
+        };
+
+        document.getElementById('ttt-copy').onclick = async () => {
+            const status = document.getElementById('ttt-status');
+            if (!lastCopiedText) {
+                status.textContent = 'Nothing to copy yet.';
+                return;
+            }
+            try {
+                await navigator.clipboard.writeText(lastCopiedText);
+                status.textContent = 'Copied!';
+            } catch {
+                status.textContent = 'Clipboard copy failed.';
+            }
+        };
+
+        document.getElementById('ttt-run').onclick = runTracker;
+
+        applyCompactMode();
+
+        makeDraggable(panel, document.getElementById('ttt-pda-header'), 'panel');
+        makeDraggable(bubble, bubble, 'bubble');
+    }
+
+    function makeDraggable(element, handle, type) {
+        let dragging = false;
+        let startX = 0;
+        let startY = 0;
+        let startLeft = 0;
+        let startTop = 0;
+        let moved = false;
+
+        function start(clientX, clientY) {
+            dragging = true;
+            moved = false;
+            const rect = element.getBoundingClientRect();
+            element.style.left = `${rect.left}px`;
+            element.style.top = `${rect.top}px`;
+            startX = clientX;
+            startY = clientY;
+            startLeft = rect.left;
+            startTop = rect.top;
+        }
+
+        function move(clientX, clientY) {
+            if (!dragging) return;
+            const dx = clientX - startX;
+            const dy = clientY - startY;
+
+            if (Math.abs(dx) > 3 || Math.abs(dy) > 3) moved = true;
+
+            const maxLeft = Math.max(10, window.innerWidth - element.offsetWidth - 10);
+            const maxTop = Math.max(10, window.innerHeight - element.offsetHeight - 10);
+
+            element.style.left = `${clamp(startLeft + dx, 10, maxLeft)}px`;
+            element.style.top = `${clamp(startTop + dy, 10, maxTop)}px`;
+        }
+
+        function end() {
+            if (!dragging) return;
+            dragging = false;
+
+            const state = loadUIState();
+            if (type === 'panel') {
+                state.left = parseInt(element.style.left, 10) || state.left;
+                state.top = parseInt(element.style.top, 10) || state.top;
+            } else {
+                state.bubbleLeft = parseInt(element.style.left, 10) || state.bubbleLeft;
+                state.bubbleTop = parseInt(element.style.top, 10) || state.bubbleTop;
+            }
+            saveUIState(state);
+        }
+
+        handle.addEventListener('mousedown', (e) => start(e.clientX, e.clientY));
+        document.addEventListener('mousemove', (e) => move(e.clientX, e.clientY));
+        document.addEventListener('mouseup', end);
+
+        handle.addEventListener('touchstart', (e) => {
+            const t = e.touches[0];
+            if (t) start(t.clientX, t.clientY);
+        }, { passive: true });
+
+        document.addEventListener('touchmove', (e) => {
+            const t = e.touches[0];
+            if (t) move(t.clientX, t.clientY);
+        }, { passive: true });
+
+        document.addEventListener('touchend', end, { passive: true });
+
+        if (type === 'bubble') {
+            handle.addEventListener('click', (e) => {
+                if (moved) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    moved = false;
+                }
+            }, true);
+        }
+    }
+
+    async function runTracker() {
+        const status = document.getElementById('ttt-status');
+        const results = document.getElementById('ttt-results');
+
+        const apiKey = document.getElementById('ttt-api').value.trim();
+        const factionId = document.getElementById('ttt-faction').value.trim();
+        const licenseKey = document.getElementById('ttt-license').value.trim();
+        const startRaw = document.getElementById('ttt-start').value;
+        const endRaw = document.getElementById('ttt-end').value;
+
+        const start = startRaw ? new Date(`${startRaw}T00:00:00`) : new Date('2000-01-01T00:00:00');
+        const end = endRaw ? new Date(`${endRaw}T23:59:59`) : new Date('2100-01-01T23:59:59');
+
+        if (!apiKey || !factionId || !licenseKey) {
+            status.textContent = 'Missing API key, faction ID, or license key.';
+            return;
+        }
+
+        try {
+            status.textContent = 'Validating license...';
+            const valid = await validateLicense(licenseKey, factionId);
+
+            if (!valid) {
+                status.textContent = 'Invalid license.';
+                return;
+            }
+
+            saveSettings({ apiKey, factionId, licenseKey });
+
+            status.textContent = 'Loading chains...';
+            results.innerHTML = '';
+            lastCopiedText = '';
+
+            const chainData = await fetchApi(`https://api.torn.com/v2/faction/${factionId}/chains`, apiKey);
+            const chains = normalizeChains(chainData);
+
+            const filtered = chains.filter(c => {
+                const ts = c.timestamp ?? c.started ?? c.start ?? c.start_time ?? 0;
+                if (!ts) return false;
+                const d = new Date(ts * 1000);
+                return d >= start && d <= end;
+            });
+
+            if (!filtered.length) {
+                status.textContent = 'No chains found.';
+                return;
+            }
+
+            const master = {};
+
+            for (let i = 0; i < filtered.length; i++) {
+                const chainId = filtered[i].id ?? filtered[i].chain_id ?? filtered[i].chain;
+                if (!chainId) continue;
+
+                status.textContent = `Loading ${i + 1}/${filtered.length}`;
+
+                const report = await fetchInternal(`/war.php?step=getChainReport&chainID=${chainId}`);
+                const rows = getRows(report);
+
+                for (const row of rows) {
+                    if (String(row.factionID) !== String(factionId)) continue;
+
+                    const name = row.playername ?? row.name ?? `ID ${row.userID ?? 'unknown'}`;
+                    const hits = Number(row.attacks ?? 0);
+
+                    if (!master[name]) {
+                        master[name] = { hits: 0, chains: 0 };
+                    }
+
+                    master[name].hits += hits;
+                    if (hits > 0) master[name].chains += 1;
+                }
+
+                await sleep(80);
+            }
+
+            const sorted = Object.entries(master).sort((a, b) => b[1].hits - a[1].hits);
+
+            let html = `
+                <div style="font-size:14px;font-weight:700;margin-bottom:8px;color:#c94f9d;">Results</div>
+                <div style="font-size:11px;color:#8a4a73;margin-bottom:8px;">${startRaw || 'start'} → ${endRaw || 'now'}</div>
+            `;
+
+            for (const [name, d] of sorted) {
+                html += `
+                    <div style="padding:8px 0;border-bottom:1px solid #f3c3de;">
+                        <div style="font-weight:700;color:#4a2340;">${name}</div>
+                        <div>
+                            <span style="color:#d45b87;">Hits: ${d.hits}</span>
+                            &nbsp;|&nbsp;
+                            <span style="color:#c94f9d;">Chains: ${d.chains}</span>
+                        </div>
+                    </div>
+                `;
+            }
+
+            lastCopiedText = buildCopiedText(sorted, startRaw, endRaw);
+            results.innerHTML = html;
+            status.textContent = 'Done';
+        } catch (err) {
+            console.error(err);
+            status.textContent = `Error: ${err.message}`;
+        }
+    }
+
+    createUI();
+})();
