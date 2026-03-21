@@ -11,7 +11,7 @@
     'use strict';
 
     const STORAGE_KEY = 'ttt_chain_tracker_desktop_settings';
-    const LICENSE_URL = 'PASTE_YOUR_RAW_LICENSES_JSON_URL_HERE';
+    const LICENSE_URL = 'https://github.com/thicctiredthot/Faction-chain-tracker-pda/blob/main/Licences-Json';
 
     let lastCopiedText = '';
     let panelVisible = true;
