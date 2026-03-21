@@ -12,7 +12,7 @@
 
     const SETTINGS_KEY = 'ttt_chain_tracker_pda_settings';
     const UI_STATE_KEY = 'ttt_chain_tracker_pda_ui';
-    const LICENSE_URL = 'PASTE_YOUR_RAW_LICENSES_JSON_URL_HERE';
+    const LICENSE_URL = 'https://github.com/thicctiredthot/Faction-chain-tracker-pda/blob/main/Licences-Json';
 
     let lastCopiedText = '';
 
