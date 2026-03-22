@@ -1,17 +1,21 @@
 // ==UserScript==
 // @name         ThiccTiredthots Faction Chain Tracker (Desktop)
 // @namespace    thicctiredthot
-// @version      2.2
+// @version      2.3
 // @description  Desktop faction chain tracker with license validation
 // @match        https://www.torn.com/*
 // @grant        GM_addStyle
+// @grant        GM_xmlhttpRequest
+// @connect      raw.githubusercontent.com
+// @connect      cdn.jsdelivr.net
+// @connect      api.torn.com
 // ==/UserScript==
 
 (function () {
     'use strict';
 
     const STORAGE_KEY = 'ttt_chain_tracker_desktop_settings';
-    const LICENSE_URL = 'const LICENSE_URL = 'https://cdn.jsdelivr.net/gh/thicctiredthot/Faction-chain-tracker-pda@main/licenses.json';';
+    const LICENSE_URL = 'https://raw.githubusercontent.com/thicctiredthot/Faction-chain-tracker-pda/main/licenses.json';
 
     let lastCopiedText = '';
     let panelVisible = true;
@@ -47,41 +51,33 @@
             .replace(/>/g, '&gt;');
     }
 
-    async function fetchJson(url, options = {}, timeoutMs = 15000) {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-        try {
-            const res = await fetch(url, {
-                ...options,
-                signal: controller.signal
+    function gmGetJson(url, timeoutMs = 15000) {
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url,
+                timeout: timeoutMs,
+                onload: (res) => {
+                    try {
+                        if (res.status < 200 || res.status >= 300) {
+                            reject(new Error(`HTTP ${res.status}`));
+                            return;
+                        }
+                        const data = JSON.parse(res.responseText);
+                        resolve(data);
+                    } catch (err) {
+                        reject(new Error('Response was not valid JSON'));
+                    }
+                },
+                onerror: () => reject(new Error('Network request failed')),
+                ontimeout: () => reject(new Error('Request timed out'))
             });
-
-            let data;
-            try {
-                data = await res.json();
-            } catch {
-                throw new Error('Response was not valid JSON');
-            }
-
-            if (!res.ok) {
-                throw new Error(`HTTP ${res.status}`);
-            }
-
-            return data;
-        } catch (err) {
-            if (err.name === 'AbortError') {
-                throw new Error('Request timed out');
-            }
-            throw err;
-        } finally {
-            clearTimeout(timer);
-        }
+        });
     }
 
     async function validateLicense(licenseKey, factionId) {
         try {
-            const licenses = await fetchJson(LICENSE_URL, {}, 10000);
+            const licenses = await gmGetJson(LICENSE_URL, 10000);
             return String(licenses[licenseKey] || '') === String(factionId);
         } catch (err) {
             throw new Error(`License fetch failed: ${err.message}`);
@@ -92,12 +88,10 @@
         const url = `https://api.torn.com/faction/${encodeURIComponent(factionId)}?selections=chains&key=${encodeURIComponent(apiKey)}`;
 
         try {
-            const data = await fetchJson(url, {}, 15000);
-
+            const data = await gmGetJson(url, 15000);
             if (data?.error) {
                 throw new Error(data.error.error || 'Unknown API error');
             }
-
             return data;
         } catch (err) {
             throw new Error(`Torn API fetch failed: ${err.message}`);
