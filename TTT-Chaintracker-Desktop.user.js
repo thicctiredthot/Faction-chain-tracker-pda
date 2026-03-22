@@ -1,13 +1,11 @@
 // ==UserScript==
 // @name         ThiccTiredthots Faction Chain Tracker (Desktop)
 // @namespace    thicctiredthot
-// @version      2.3
-// @description  Desktop faction chain tracker with license validation
+// @version      2.4
+// @description  Desktop faction chain tracker with built-in license validation
 // @match        https://www.torn.com/*
 // @grant        GM_addStyle
 // @grant        GM_xmlhttpRequest
-// @connect      raw.githubusercontent.com
-// @connect      cdn.jsdelivr.net
 // @connect      api.torn.com
 // ==/UserScript==
 
@@ -15,7 +13,12 @@
     'use strict';
 
     const STORAGE_KEY = 'ttt_chain_tracker_desktop_settings';
-    const LICENSE_URL = 'https://raw.githubusercontent.com/thicctiredthot/Faction-chain-tracker-pda/main/licenses.json';
+
+    // Built-in license list
+    const LICENSES = {
+        'TTT-IC-112233': '54379',
+        'TTT-LA-778899': '54573'
+    };
 
     let lastCopiedText = '';
     let panelVisible = true;
@@ -65,7 +68,7 @@
                         }
                         const data = JSON.parse(res.responseText);
                         resolve(data);
-                    } catch (err) {
+                    } catch {
                         reject(new Error('Response was not valid JSON'));
                     }
                 },
@@ -76,12 +79,7 @@
     }
 
     async function validateLicense(licenseKey, factionId) {
-        try {
-            const licenses = await gmGetJson(LICENSE_URL, 10000);
-            return String(licenses[licenseKey] || '') === String(factionId);
-        } catch (err) {
-            throw new Error(`License fetch failed: ${err.message}`);
-        }
+        return String(LICENSES[licenseKey] || '') === String(factionId);
     }
 
     async function fetchChains(apiKey, factionId) {
@@ -238,20 +236,14 @@
                 return;
             }
 
-            try {
-                status.textContent = 'Validating license...';
-                const valid = await validateLicense(licenseKey, factionId);
-
-                if (!valid) {
-                    status.textContent = 'Invalid license.';
-                    return;
-                }
-
-                saveSettings({ apiKey, factionId, licenseKey });
-                status.textContent = 'Saved.';
-            } catch (err) {
-                status.textContent = err.message;
+            const valid = await validateLicense(licenseKey, factionId);
+            if (!valid) {
+                status.textContent = 'Invalid license.';
+                return;
             }
+
+            saveSettings({ apiKey, factionId, licenseKey });
+            status.textContent = 'Saved.';
         };
 
         document.getElementById('ttt-copy').onclick = async () => {
@@ -307,9 +299,7 @@
         }
 
         try {
-            status.textContent = 'Validating license...';
             const valid = await validateLicense(licenseKey, factionId);
-
             if (!valid) {
                 status.textContent = 'Invalid license.';
                 return;
