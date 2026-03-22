@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ThiccTiredthots Faction Chain Tracker (Desktop)
 // @namespace    thicctiredthot
-// @version      2.0
+// @version      2.2
 // @description  Desktop faction chain tracker with license validation
 // @match        https://www.torn.com/*
 // @grant        GM_addStyle
@@ -47,7 +47,7 @@
             .replace(/>/g, '&gt;');
     }
 
-    async function fetchJson(url, options = {}, timeoutMs = 12000) {
+    async function fetchJson(url, options = {}, timeoutMs = 15000) {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -57,43 +57,78 @@
                 signal: controller.signal
             });
 
-            const data = await res.json();
+            let data;
+            try {
+                data = await res.json();
+            } catch {
+                throw new Error('Response was not valid JSON');
+            }
 
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            if (!res.ok) {
+                throw new Error(`HTTP ${res.status}`);
+            }
+
             return data;
+        } catch (err) {
+            if (err.name === 'AbortError') {
+                throw new Error('Request timed out');
+            }
+            throw err;
         } finally {
             clearTimeout(timer);
         }
     }
 
     async function validateLicense(licenseKey, factionId) {
-        const licenses = await fetchJson(LICENSE_URL);
-        return String(licenses[licenseKey] || '') === String(factionId);
-    }
-
-    async function fetchApi(url, apiKey) {
-        const data = await fetchJson(url, {
-            headers: {
-                Authorization: `ApiKey ${apiKey}`,
-                Accept: 'application/json'
-            }
-        });
-
-        if (data?.error) {
-            throw new Error(data.error.error || 'API error');
+        try {
+            const licenses = await fetchJson(LICENSE_URL, {}, 10000);
+            return String(licenses[licenseKey] || '') === String(factionId);
+        } catch (err) {
+            throw new Error(`License fetch failed: ${err.message}`);
         }
-
-        return data;
     }
 
-    async function fetchInternal(url) {
-        return fetchJson(url, {
-            credentials: 'same-origin',
-            headers: {
-                'X-Requested-With': 'XMLHttpRequest',
-                'Accept': 'application/json'
+    async function fetchChains(apiKey, factionId) {
+        const url = `https://api.torn.com/faction/${encodeURIComponent(factionId)}?selections=chains&key=${encodeURIComponent(apiKey)}`;
+
+        try {
+            const data = await fetchJson(url, {}, 15000);
+
+            if (data?.error) {
+                throw new Error(data.error.error || 'Unknown API error');
             }
-        });
+
+            return data;
+        } catch (err) {
+            throw new Error(`Torn API fetch failed: ${err.message}`);
+        }
+    }
+
+    async function fetchInternalReport(chainId) {
+        try {
+            const res = await fetch(`/war.php?step=getChainReport&chainID=${chainId}`, {
+                credentials: 'same-origin',
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'Accept': 'application/json'
+                }
+            });
+
+            let data;
+            try {
+                data = await res.json();
+            } catch {
+                throw new Error('Report response was not valid JSON');
+            }
+
+            if (!res.ok) {
+                throw new Error(`HTTP ${res.status}`);
+            }
+
+            return data;
+        } catch (err) {
+            throw new Error(`Chain report fetch failed for ${chainId}: ${err.message}`);
+        }
     }
 
     function normalizeChains(data) {
@@ -108,7 +143,7 @@
     }
 
     function getChainId(chain) {
-        return chain.id ?? chain.chain_id ?? chain.chain ?? null;
+        return chain.ID ?? chain.id ?? chain.chain_id ?? chain.chain ?? null;
     }
 
     function unwrapReport(report) {
@@ -221,7 +256,7 @@
                 saveSettings({ apiKey, factionId, licenseKey });
                 status.textContent = 'Saved.';
             } catch (err) {
-                status.textContent = `Error: ${err.message}`;
+                status.textContent = err.message;
             }
         };
 
@@ -269,8 +304,8 @@
         const startRaw = document.getElementById('ttt-start').value;
         const endRaw = document.getElementById('ttt-end').value;
 
-        const start = startRaw ? new Date(`${startRaw}T00:00:00`) : new Date('2000-01-01T00:00:00');
-        const end = endRaw ? new Date(`${endRaw}T23:59:59`) : new Date('2100-01-01T23:59:59');
+        const start = startRaw ? new Date(`${startRaw}T00:00:00Z`) : new Date('2000-01-01T00:00:00Z');
+        const end = endRaw ? new Date(`${endRaw}T23:59:59Z`) : new Date('2100-01-01T23:59:59Z');
 
         if (!apiKey || !factionId || !licenseKey) {
             status.textContent = 'Missing API key, faction ID, or license key.';
@@ -288,11 +323,11 @@
 
             saveSettings({ apiKey, factionId, licenseKey });
 
-            status.textContent = 'Loading chains...';
+            status.textContent = 'Loading chains list...';
             results.innerHTML = '';
             lastCopiedText = '';
 
-            const chainData = await fetchApi(`https://api.torn.com/v2/faction/${factionId}/chains`, apiKey);
+            const chainData = await fetchChains(apiKey, factionId);
             const chains = normalizeChains(chainData);
 
             const filtered = chains.filter(c => {
@@ -314,9 +349,8 @@
                 const chainId = getChainId(filtered[i]);
                 if (!chainId) continue;
 
-                status.textContent = `Loading ${i + 1}/${filtered.length}`;
-
-                const report = await fetchInternal(`/war.php?step=getChainReport&chainID=${chainId}`);
+                status.textContent = `Loading report ${i + 1}/${filtered.length}`;
+                const report = await fetchInternalReport(chainId);
                 const rows = getRows(report);
 
                 for (const row of rows) {
@@ -343,7 +377,7 @@
             status.textContent = 'Done';
         } catch (err) {
             console.error(err);
-            status.textContent = `Error: ${err.message}`;
+            status.textContent = err.message;
         }
     }
 
