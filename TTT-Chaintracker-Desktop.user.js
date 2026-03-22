@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ThiccTiredthots Faction Chain Tracker (Desktop)
 // @namespace    thicctiredthot
-// @version      1.0
-// @description  Desktop chain tracker with license key system
+// @version      2.0
+// @description  Desktop faction chain tracker with license validation
 // @match        https://www.torn.com/*
 // @grant        GM_addStyle
 // ==/UserScript==
@@ -11,7 +11,7 @@
     'use strict';
 
     const STORAGE_KEY = 'ttt_chain_tracker_desktop_settings';
-    const LICENSE_URL = "https://raw.githubusercontent.com/thicctiredthot/Faction-chain-tracker-pda/main/licenses.json";
+    const LICENSE_URL = 'https://raw.githubusercontent.com/thicctiredthot/Faction-chain-tracker-pda/main/licenses.json';
 
     let lastCopiedText = '';
     let panelVisible = true;
@@ -37,6 +37,14 @@
 
     function saveSettings(settings) {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+    }
+
+    function escapeHtml(str) {
+        return String(str || '')
+            .replace(/&/g, '&amp;')
+            .replace(/"/g, '&quot;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
     }
 
     async function fetchJson(url, options = {}, timeoutMs = 12000) {
@@ -122,6 +130,29 @@
         return text.trim();
     }
 
+    function formatResults(sorted, startRaw, endRaw) {
+        let html = `
+            <div class="ttt-results-title">Results</div>
+            <div class="ttt-results-sub">${startRaw || 'start'} → ${endRaw || 'now'}</div>
+        `;
+
+        if (!sorted.length) {
+            html += `<div class="ttt-empty">No usable report data found.</div>`;
+            return html;
+        }
+
+        for (const [name, d] of sorted) {
+            html += `
+                <div class="ttt-item">
+                    <div class="ttt-name">${name}</div>
+                    <div class="ttt-stats">Hits: ${d.hits} | Chains: ${d.chains}</div>
+                </div>
+            `;
+        }
+
+        return html;
+    }
+
     function createUI() {
         if (document.getElementById('ttt-desktop-wrapper')) return;
 
@@ -196,10 +227,12 @@
 
         document.getElementById('ttt-copy').onclick = async () => {
             const status = document.getElementById('ttt-status');
+
             if (!lastCopiedText) {
                 status.textContent = 'Nothing to copy yet.';
                 return;
             }
+
             try {
                 await navigator.clipboard.writeText(lastCopiedText);
                 status.textContent = 'Copied!';
@@ -271,6 +304,7 @@
 
             if (!filtered.length) {
                 status.textContent = 'No chains found.';
+                results.innerHTML = '<div class="ttt-empty">No chains found in that date range.</div>';
                 return;
             }
 
@@ -304,19 +338,8 @@
 
             const sorted = Object.entries(master).sort((a, b) => b[1].hits - a[1].hits);
 
-            let html = `<div class="ttt-sub">${startRaw || 'start'} → ${endRaw || 'now'}</div>`;
-
-            for (const [name, d] of sorted) {
-                html += `
-                    <div class="ttt-item">
-                        <div class="ttt-name">${name}</div>
-                        <div class="ttt-stats">Hits: ${d.hits} | Chains: ${d.chains}</div>
-                    </div>
-                `;
-            }
-
             lastCopiedText = buildCopiedText(sorted, startRaw, endRaw);
-            results.innerHTML = html;
+            results.innerHTML = formatResults(sorted, startRaw, endRaw);
             status.textContent = 'Done';
         } catch (err) {
             console.error(err);
@@ -356,20 +379,12 @@
         });
     }
 
-    function escapeHtml(str) {
-        return String(str || '')
-            .replace(/&/g, '&amp;')
-            .replace(/"/g, '&quot;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;');
-    }
-
     GM_addStyle(`
         #ttt-desktop-panel {
             position: fixed;
             top: 90px;
             right: 20px;
-            width: 420px;
+            width: 460px;
             background: #fff7fb;
             color: #4a2340;
             border: 2px solid #f3a6d6;
@@ -378,10 +393,11 @@
             z-index: 999999;
             box-shadow: 0 10px 28px rgba(0,0,0,0.25);
         }
+
         #ttt-desktop-toggle {
             position: fixed;
             top: 90px;
-            right: 452px;
+            right: 492px;
             z-index: 999999;
             background: #f08ac0;
             color: #fff;
@@ -390,18 +406,23 @@
             padding: 8px 10px;
             font-weight: 700;
             cursor: pointer;
+            box-shadow: 0 6px 18px rgba(0,0,0,0.18);
         }
+
         #ttt-desktop-header {
-            font-size: 20px;
+            font-size: 18px;
             font-weight: 700;
             margin-bottom: 10px;
             color: #c94f9d;
             cursor: move;
         }
+
         .ttt-label {
             font-size: 12px;
             margin-bottom: 4px;
+            color: #8a4a73;
         }
+
         #ttt-desktop-panel input {
             width: 100%;
             margin-bottom: 10px;
@@ -412,11 +433,13 @@
             background: #fff;
             color: #4a2340;
         }
+
         .ttt-row {
             display: flex;
             gap: 8px;
             margin-bottom: 10px;
         }
+
         #ttt-desktop-panel button {
             flex: 1;
             background: #f08ac0;
@@ -427,32 +450,57 @@
             font-weight: 700;
             cursor: pointer;
         }
+
         #ttt-hide, #ttt-copy {
             background: #fff;
             color: #c94f9d;
             border: 1px solid #f3a6d6;
         }
+
         #ttt-status {
             margin-top: 8px;
             font-size: 12px;
             color: #8a4a73;
         }
+
         #ttt-results {
             margin-top: 10px;
             max-height: 380px;
             overflow: auto;
         }
+
+        .ttt-results-title {
+            font-size: 14px;
+            font-weight: 700;
+            margin-bottom: 8px;
+            color: #c94f9d;
+        }
+
+        .ttt-results-sub {
+            font-size: 11px;
+            color: #8a4a73;
+            margin-bottom: 8px;
+        }
+
         .ttt-item {
             padding: 8px 0;
             border-bottom: 1px solid #f3c3de;
         }
+
         .ttt-name {
             font-weight: 700;
             color: #4a2340;
         }
-        .ttt-stats, .ttt-sub {
-            color: #c94f9d;
+
+        .ttt-stats {
+            color: #d45b87;
             font-size: 12px;
+        }
+
+        .ttt-empty {
+            color: #d45b87;
+            font-size: 12px;
+            padding: 8px 0;
         }
     `);
 
