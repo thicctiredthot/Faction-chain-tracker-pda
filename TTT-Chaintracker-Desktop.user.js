@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ThiccTiredthots Faction Chain Tracker (Desktop)
 // @namespace    thicctiredthot
-// @version      2.4
+// @version      2.5
 // @description  Desktop faction chain tracker with built-in license validation
 // @match        https://www.torn.com/*
 // @grant        GM_addStyle
@@ -14,7 +14,6 @@
 
     const STORAGE_KEY = 'ttt_chain_tracker_desktop_settings';
 
-    // Built-in license list
     const LICENSES = {
         'TTT-IC-112233': '54379',
         'TTT-LA-778899': '54573'
@@ -54,6 +53,10 @@
             .replace(/>/g, '&gt;');
     }
 
+    function normalizeLicenseKey(key) {
+        return String(key || '').replace(/\s+/g, '').toUpperCase();
+    }
+
     function gmGetJson(url, timeoutMs = 15000) {
         return new Promise((resolve, reject) => {
             GM_xmlhttpRequest({
@@ -79,20 +82,30 @@
     }
 
     async function validateLicense(licenseKey, factionId) {
-        return String(LICENSES[licenseKey] || '') === String(factionId);
+        const cleanKey = normalizeLicenseKey(licenseKey);
+        const cleanFaction = String(factionId || '').trim();
+        return String(LICENSES[cleanKey] || '') === cleanFaction;
     }
 
     async function fetchChains(apiKey, factionId) {
-        const url = `https://api.torn.com/faction/${encodeURIComponent(factionId)}?selections=chains&key=${encodeURIComponent(apiKey)}`;
-
         try {
-            const data = await gmGetJson(url, 15000);
+            const v2Url = `https://api.torn.com/v2/faction/${encodeURIComponent(factionId)}/chains?key=${encodeURIComponent(apiKey)}`;
+            const data = await gmGetJson(v2Url, 15000);
+
+            if (data?.error) {
+                throw new Error(data.error.error || 'Unknown v2 API error');
+            }
+
+            return data;
+        } catch (err) {
+            const v1Url = `https://api.torn.com/faction/${encodeURIComponent(factionId)}?selections=chains&key=${encodeURIComponent(apiKey)}`;
+            const data = await gmGetJson(v1Url, 15000);
+
             if (data?.error) {
                 throw new Error(data.error.error || 'Unknown API error');
             }
+
             return data;
-        } catch (err) {
-            throw new Error(`Torn API fetch failed: ${err.message}`);
         }
     }
 
@@ -131,19 +144,46 @@
     }
 
     function getChainTimestamp(chain) {
-        return chain.timestamp ?? chain.started ?? chain.start ?? chain.start_time ?? 0;
+        return (
+            chain.timestamp ??
+            chain.started ??
+            chain.start ??
+            chain.start_time ??
+            chain.ended ??
+            chain.end ??
+            chain.end_time ??
+            0
+        );
     }
 
     function getChainId(chain) {
-        return chain.ID ?? chain.id ?? chain.chain_id ?? chain.chain ?? null;
+        return (
+            chain.ID ??
+            chain.id ??
+            chain.chain_id ??
+            chain.chain ??
+            null
+        );
     }
 
     function unwrapReport(report) {
-        return report?.result?.chainreport ?? report?.chainreport ?? report?.result ?? report ?? {};
+        return report?.result?.chainreport
+            ?? report?.chainreport
+            ?? report?.result
+            ?? report
+            ?? {};
     }
 
     function getRows(report) {
-        return Object.values(unwrapReport(report).members || {});
+        const unwrapped = unwrapReport(report);
+
+        if (Array.isArray(unwrapped.members)) return unwrapped.members;
+        if (unwrapped.members && typeof unwrapped.members === 'object') return Object.values(unwrapped.members);
+
+        if (Array.isArray(unwrapped.attackers)) return unwrapped.attackers;
+        if (unwrapped.attackers && typeof unwrapped.attackers === 'object') return Object.values(unwrapped.attackers);
+
+        return [];
     }
 
     function buildCopiedText(sorted, startRaw, endRaw) {
@@ -228,7 +268,7 @@
         document.getElementById('ttt-save').onclick = async () => {
             const apiKey = document.getElementById('ttt-api').value.trim();
             const factionId = document.getElementById('ttt-faction').value.trim();
-            const licenseKey = document.getElementById('ttt-license').value.trim();
+            const licenseKey = normalizeLicenseKey(document.getElementById('ttt-license').value);
             const status = document.getElementById('ttt-status');
 
             if (!apiKey || !factionId || !licenseKey) {
@@ -237,12 +277,14 @@
             }
 
             const valid = await validateLicense(licenseKey, factionId);
+
             if (!valid) {
-                status.textContent = 'Invalid license.';
+                status.textContent = `Invalid license. Key="${licenseKey}" Faction="${factionId}"`;
                 return;
             }
 
             saveSettings({ apiKey, factionId, licenseKey });
+            document.getElementById('ttt-license').value = licenseKey;
             status.textContent = 'Saved.';
         };
 
@@ -286,7 +328,7 @@
 
         const apiKey = document.getElementById('ttt-api').value.trim();
         const factionId = document.getElementById('ttt-faction').value.trim();
-        const licenseKey = document.getElementById('ttt-license').value.trim();
+        const licenseKey = normalizeLicenseKey(document.getElementById('ttt-license').value);
         const startRaw = document.getElementById('ttt-start').value;
         const endRaw = document.getElementById('ttt-end').value;
 
@@ -301,11 +343,12 @@
         try {
             const valid = await validateLicense(licenseKey, factionId);
             if (!valid) {
-                status.textContent = 'Invalid license.';
+                status.textContent = `Invalid license. Key="${licenseKey}" Faction="${factionId}"`;
                 return;
             }
 
             saveSettings({ apiKey, factionId, licenseKey });
+            document.getElementById('ttt-license').value = licenseKey;
 
             status.textContent = 'Loading chains list...';
             results.innerHTML = '';
@@ -322,8 +365,8 @@
             });
 
             if (!filtered.length) {
-                status.textContent = 'No chains found.';
-                results.innerHTML = '<div class="ttt-empty">No chains found in that date range.</div>';
+                status.textContent = `No chains found. Total pulled before date filter: ${chains.length}`;
+                results.innerHTML = '<div class="ttt-empty">No chains matched that date range.</div>';
                 return;
             }
 
@@ -338,10 +381,11 @@
                 const rows = getRows(report);
 
                 for (const row of rows) {
-                    if (String(row.factionID) !== String(factionId)) continue;
+                    const rowFaction = String(row.factionID ?? row.factionId ?? '');
+                    const name = row.playername ?? row.name ?? row.username ?? `ID ${row.userID ?? 'unknown'}`;
+                    const hits = Number(row.attacks ?? row.hits ?? 0);
 
-                    const name = row.playername ?? row.name ?? `ID ${row.userID ?? 'unknown'}`;
-                    const hits = Number(row.attacks ?? 0);
+                    if (rowFaction && rowFaction !== String(factionId)) continue;
 
                     if (!master[name]) {
                         master[name] = { hits: 0, chains: 0 };
