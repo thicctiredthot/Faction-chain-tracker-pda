@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ThiccTiredthots Faction Chain Tracker (PDA)
 // @namespace    thicctiredthot
-// @version      1.0
-// @description  PDA chain tracker with license key system
+// @version      3.0
+// @description  PDA faction chain tracker with no license system
 // @match        https://www.torn.com/*
 // @grant        none
 // ==/UserScript==
@@ -12,7 +12,6 @@
 
     const SETTINGS_KEY = 'ttt_chain_tracker_pda_settings';
     const UI_STATE_KEY = 'ttt_chain_tracker_pda_ui';
-    const LICENSE_URL = 'https://github.com/thicctiredthot/Faction-chain-tracker-pda/blob/main/Licences-Json';
 
     let lastCopiedText = '';
 
@@ -23,14 +22,12 @@
             const raw = localStorage.getItem(SETTINGS_KEY);
             return raw ? JSON.parse(raw) : {
                 apiKey: '',
-                factionId: '',
-                licenseKey: ''
+                factionId: ''
             };
         } catch {
             return {
                 apiKey: '',
-                factionId: '',
-                licenseKey: ''
+                factionId: ''
             };
         }
     }
@@ -79,7 +76,7 @@
             .replace(/>/g, '&gt;');
     }
 
-    async function fetchJson(url, options = {}, timeoutMs = 12000) {
+    async function fetchJson(url, options = {}, timeoutMs = 15000) {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -93,52 +90,113 @@
 
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             return data;
+        } catch (err) {
+            if (err.name === 'AbortError') {
+                throw new Error('Request timed out');
+            }
+            throw err;
         } finally {
             clearTimeout(timer);
         }
     }
 
-    async function validateLicense(licenseKey, factionId) {
-        const licenses = await fetchJson(LICENSE_URL);
-        return String(licenses[licenseKey] || '') === String(factionId);
-    }
+    async function fetchChains(apiKey, factionId) {
+        try {
+            const v2Url = `https://api.torn.com/v2/faction/${encodeURIComponent(factionId)}/chains?key=${encodeURIComponent(apiKey)}`;
+            const data = await fetchJson(v2Url, {}, 15000);
 
-    async function fetchApi(url, apiKey) {
-        const data = await fetchJson(url, {
-            headers: {
-                Authorization: `ApiKey ${apiKey}`,
-                Accept: 'application/json'
+            if (data?.error) {
+                throw new Error(data.error.error || 'Unknown v2 API error');
             }
-        });
 
-        if (data?.error) {
-            throw new Error(data.error.error || 'API error');
+            return data;
+        } catch (err) {
+            const v1Url = `https://api.torn.com/faction/${encodeURIComponent(factionId)}?selections=chains&key=${encodeURIComponent(apiKey)}`;
+            const data = await fetchJson(v1Url, {}, 15000);
+
+            if (data?.error) {
+                throw new Error(data.error.error || 'Unknown API error');
+            }
+
+            return data;
         }
-
-        return data;
     }
 
-    async function fetchInternal(url) {
-        return fetchJson(url, {
-            credentials: 'same-origin',
-            headers: {
-                'X-Requested-With': 'XMLHttpRequest',
-                'Accept': 'application/json'
+    async function fetchInternalReport(chainId) {
+        try {
+            const res = await fetch(`/war.php?step=getChainReport&chainID=${chainId}`, {
+                credentials: 'same-origin',
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'Accept': 'application/json'
+                }
+            });
+
+            let data;
+            try {
+                data = await res.json();
+            } catch {
+                throw new Error('Report response was not valid JSON');
             }
-        });
+
+            if (!res.ok) {
+                throw new Error(`HTTP ${res.status}`);
+            }
+
+            return data;
+        } catch (err) {
+            throw new Error(`Chain report fetch failed for ${chainId}: ${err.message}`);
+        }
     }
 
     function normalizeChains(data) {
         if (Array.isArray(data)) return data;
-        return Object.values(data.chains || {});
+        if (Array.isArray(data.chains)) return data.chains;
+        if (data.chains && typeof data.chains === 'object') return Object.values(data.chains);
+        return [];
+    }
+
+    function getChainTimestamp(chain) {
+        return (
+            chain.timestamp ??
+            chain.started ??
+            chain.start ??
+            chain.start_time ??
+            chain.ended ??
+            chain.end ??
+            chain.end_time ??
+            0
+        );
+    }
+
+    function getChainId(chain) {
+        return (
+            chain.ID ??
+            chain.id ??
+            chain.chain_id ??
+            chain.chain ??
+            null
+        );
     }
 
     function unwrapReport(report) {
-        return report?.result?.chainreport ?? report?.chainreport ?? report?.result ?? report ?? {};
+        return report?.result?.chainreport
+            ?? report?.chainreport
+            ?? report?.result
+            ?? report
+            ?? {};
     }
 
     function getRows(report) {
-        return Object.values(unwrapReport(report).members || {});
+        const unwrapped = unwrapReport(report);
+
+        if (Array.isArray(unwrapped.members)) return unwrapped.members;
+        if (unwrapped.members && typeof unwrapped.members === 'object') return Object.values(unwrapped.members);
+
+        if (Array.isArray(unwrapped.attackers)) return unwrapped.attackers;
+        if (unwrapped.attackers && typeof unwrapped.attackers === 'object') return Object.values(unwrapped.attackers);
+
+        return [];
     }
 
     function buildCopiedText(sorted, startRaw, endRaw) {
@@ -156,7 +214,7 @@
         if (document.getElementById('ttt-pda-bubble')) return;
 
         const settings = loadSettings();
-        const hasSetup = !!(settings.apiKey && settings.factionId && settings.licenseKey);
+        const hasSetup = !!(settings.apiKey && settings.factionId);
 
         const uiState = loadUIState();
         if (hasSetup && uiState.compact === false) {
@@ -214,9 +272,6 @@
                 <div style="font-size:12px;">Faction ID</div>
                 <input id="ttt-faction" type="text" value="${escapeHtml(settings.factionId)}" style="width:100%;margin-bottom:10px;padding:8px;border-radius:8px;border:1px solid #f3c3de;box-sizing:border-box;">
 
-                <div style="font-size:12px;">License Key</div>
-                <input id="ttt-license" type="text" value="${escapeHtml(settings.licenseKey)}" style="width:100%;margin-bottom:10px;padding:8px;border-radius:8px;border:1px solid #f3c3de;box-sizing:border-box;">
-
                 <div style="display:flex;gap:8px;margin-bottom:10px;">
                     <button id="ttt-save" style="flex:1;background:#f08ac0;color:#fff;border:none;padding:10px 8px;border-radius:8px;font-weight:700;">Save</button>
                     <button id="ttt-clear" style="flex:1;background:#fff;color:#c94f9d;border:1px solid #f3a6d6;padding:10px 8px;border-radius:8px;font-weight:700;">Clear</button>
@@ -238,7 +293,7 @@
                 <button id="ttt-copy" style="flex:1;background:#fff;color:#c94f9d;border:1px solid #f3a6d6;padding:10px 8px;border-radius:8px;font-weight:700;">Copy</button>
             </div>
 
-            <div id="ttt-status" style="margin-top:10px;font-size:12px;color:#8a4a73;"></div>
+            <div id="ttt-status" style="margin-top:10px;font-size:12px;color:#8a4a73;">Ready</div>
             <div id="ttt-results" style="margin-top:10px;max-height:32vh;overflow:auto;"></div>
         `;
 
@@ -275,44 +330,30 @@
             applyCompactMode();
         };
 
-        document.getElementById('ttt-save').onclick = async () => {
+        document.getElementById('ttt-save').onclick = () => {
             const apiKey = document.getElementById('ttt-api').value.trim();
             const factionId = document.getElementById('ttt-faction').value.trim();
-            const licenseKey = document.getElementById('ttt-license').value.trim();
             const status = document.getElementById('ttt-status');
 
-            if (!apiKey || !factionId || !licenseKey) {
+            if (!apiKey || !factionId) {
                 status.textContent = 'Fill all fields first.';
                 return;
             }
 
-            try {
-                status.textContent = 'Validating license...';
-                const valid = await validateLicense(licenseKey, factionId);
+            saveSettings({ apiKey, factionId });
 
-                if (!valid) {
-                    status.textContent = 'Invalid license.';
-                    return;
-                }
+            const state = loadUIState();
+            state.compact = true;
+            saveUIState(state);
+            applyCompactMode();
 
-                saveSettings({ apiKey, factionId, licenseKey });
-
-                const state = loadUIState();
-                state.compact = true;
-                saveUIState(state);
-                applyCompactMode();
-
-                status.textContent = 'Saved.';
-            } catch (err) {
-                status.textContent = `Error: ${err.message}`;
-            }
+            status.textContent = 'Saved.';
         };
 
         document.getElementById('ttt-clear').onclick = () => {
             clearSettings();
             document.getElementById('ttt-api').value = '';
             document.getElementById('ttt-faction').value = '';
-            document.getElementById('ttt-license').value = '';
 
             const state = loadUIState();
             state.compact = false;
@@ -426,64 +467,56 @@
 
         const apiKey = document.getElementById('ttt-api').value.trim();
         const factionId = document.getElementById('ttt-faction').value.trim();
-        const licenseKey = document.getElementById('ttt-license').value.trim();
         const startRaw = document.getElementById('ttt-start').value;
         const endRaw = document.getElementById('ttt-end').value;
 
-        const start = startRaw ? new Date(`${startRaw}T00:00:00`) : new Date('2000-01-01T00:00:00');
-        const end = endRaw ? new Date(`${endRaw}T23:59:59`) : new Date('2100-01-01T23:59:59');
+        const start = startRaw ? new Date(`${startRaw}T00:00:00Z`) : new Date('2000-01-01T00:00:00Z');
+        const end = endRaw ? new Date(`${endRaw}T23:59:59Z`) : new Date('2100-01-01T23:59:59Z');
 
-        if (!apiKey || !factionId || !licenseKey) {
-            status.textContent = 'Missing API key, faction ID, or license key.';
+        if (!apiKey || !factionId) {
+            status.textContent = 'Missing API key or faction ID.';
             return;
         }
 
         try {
-            status.textContent = 'Validating license...';
-            const valid = await validateLicense(licenseKey, factionId);
+            saveSettings({ apiKey, factionId });
 
-            if (!valid) {
-                status.textContent = 'Invalid license.';
-                return;
-            }
-
-            saveSettings({ apiKey, factionId, licenseKey });
-
-            status.textContent = 'Loading chains...';
+            status.textContent = 'Loading chains list...';
             results.innerHTML = '';
             lastCopiedText = '';
 
-            const chainData = await fetchApi(`https://api.torn.com/v2/faction/${factionId}/chains`, apiKey);
+            const chainData = await fetchChains(apiKey, factionId);
             const chains = normalizeChains(chainData);
 
             const filtered = chains.filter(c => {
-                const ts = c.timestamp ?? c.started ?? c.start ?? c.start_time ?? 0;
+                const ts = getChainTimestamp(c);
                 if (!ts) return false;
                 const d = new Date(ts * 1000);
                 return d >= start && d <= end;
             });
 
             if (!filtered.length) {
-                status.textContent = 'No chains found.';
+                status.textContent = `No chains found. Total pulled before date filter: ${chains.length}`;
+                results.innerHTML = '<div style="color:#d45b87;font-size:12px;padding:8px 0;">No chains matched that date range.</div>';
                 return;
             }
 
             const master = {};
 
             for (let i = 0; i < filtered.length; i++) {
-                const chainId = filtered[i].id ?? filtered[i].chain_id ?? filtered[i].chain;
+                const chainId = getChainId(filtered[i]);
                 if (!chainId) continue;
 
-                status.textContent = `Loading ${i + 1}/${filtered.length}`;
-
-                const report = await fetchInternal(`/war.php?step=getChainReport&chainID=${chainId}`);
+                status.textContent = `Loading report ${i + 1}/${filtered.length}`;
+                const report = await fetchInternalReport(chainId);
                 const rows = getRows(report);
 
                 for (const row of rows) {
-                    if (String(row.factionID) !== String(factionId)) continue;
+                    const rowFaction = String(row.factionID ?? row.factionId ?? '');
+                    const name = row.playername ?? row.name ?? row.username ?? `ID ${row.userID ?? 'unknown'}`;
+                    const hits = Number(row.attacks ?? row.hits ?? 0);
 
-                    const name = row.playername ?? row.name ?? `ID ${row.userID ?? 'unknown'}`;
-                    const hits = Number(row.attacks ?? 0);
+                    if (rowFaction && rowFaction !== String(factionId)) continue;
 
                     if (!master[name]) {
                         master[name] = { hits: 0, chains: 0 };
@@ -503,17 +536,21 @@
                 <div style="font-size:11px;color:#8a4a73;margin-bottom:8px;">${startRaw || 'start'} → ${endRaw || 'now'}</div>
             `;
 
-            for (const [name, d] of sorted) {
-                html += `
-                    <div style="padding:8px 0;border-bottom:1px solid #f3c3de;">
-                        <div style="font-weight:700;color:#4a2340;">${name}</div>
-                        <div>
-                            <span style="color:#d45b87;">Hits: ${d.hits}</span>
-                            &nbsp;|&nbsp;
-                            <span style="color:#c94f9d;">Chains: ${d.chains}</span>
+            if (!sorted.length) {
+                html += `<div style="color:#d45b87;font-size:12px;padding:8px 0;">No usable report data found.</div>`;
+            } else {
+                for (const [name, d] of sorted) {
+                    html += `
+                        <div style="padding:8px 0;border-bottom:1px solid #f3c3de;">
+                            <div style="font-weight:700;color:#4a2340;">${name}</div>
+                            <div>
+                                <span style="color:#d45b87;">Hits: ${d.hits}</span>
+                                &nbsp;|&nbsp;
+                                <span style="color:#c94f9d;">Chains: ${d.chains}</span>
+                            </div>
                         </div>
-                    </div>
-                `;
+                    `;
+                }
             }
 
             lastCopiedText = buildCopiedText(sorted, startRaw, endRaw);
@@ -521,7 +558,7 @@
             status.textContent = 'Done';
         } catch (err) {
             console.error(err);
-            status.textContent = `Error: ${err.message}`;
+            status.textContent = err.message;
         }
     }
 
